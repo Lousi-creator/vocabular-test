@@ -1,31 +1,31 @@
-word,definition,wrong_count
-abandon,v. 放弃；抛弃,0
-ability,n. 能力；才能,0
-absolute,adj. 绝对的；完全的,0
-absorb,v. 吸收；吸引,0
-abstract,adj. 抽象的 n. 摘要,0
-academic,adj. 学术的；学院的,0
-access,n. 通道；入口 v. 接近,0
-accommodate,v. 容纳；提供住宿,1
-accompany,v. 陪伴；伴随,0
-accomplish,v. 完成；实现,0
-account,n. 账户；解释 v. 说明,0
-accumulate,v. 积累；聚集,0
-accurate,adj. 准确的；精确的,0
-accuse,v. 指控；谴责,0
-achieve,v. 达到；实现,0
-acknowledge,v. 承认；答谢,0
-acquire,v. 获得；学到,0
-adapt,v. 适应；改编,0
-adequate,adj. 充足的；适当的,1
-adjust,v. 调整；调节,0
-administration,n. 管理；行政部门,0
-admit,v. 承认；准许进入,0
-adopt,v. 采用；收养,0
-advance,n. & v. 前进；进步,0
-advantage,n. 优势；利益,0
-advocate,v. 提倡；主张 n. 拥护者,0
-afford,v. 买得起；承担得起,0
-agency,n. 代理机构；中介,0
-aggressive,adj. 侵略性的；有进取心的,0
-allocate,v. 分配；拨出,0
+word,definition,wrong_count,phonetic
+abandon,v. 放弃；抛弃,0,/əˈbændən/
+ability,n. 能力；才能,2,/əˈbɪləti/
+absolute,adj. 绝对的；完全的,2,/ˈæbsəluːt/
+absorb,v. 吸收；吸引,3,/əbˈzɔːrb/
+abstract,adj. 抽象的 n. 摘要,0,/ˈæbstrækt/
+academic,adj. 学术的；学院的,2,/ˌækəˈdɛmɪk/
+access,n. 通道；入口 v. 接近,2,/ˈæksɛs/
+accommodate,v. 容纳；提供住宿,3,/əˈkɑːmədeɪt/
+accompany,v. 陪伴；伴随,2,/əˈkʌmpəni/
+accomplish,v. 完成；实现,2,/əˈkɑːmplɪʃ/
+account,n. 账户；解释 v. 说明,2,/əˈkaʊnt/
+accumulate,v. 积累；聚集,2,/əˈkjuːmjəleɪt/
+accurate,adj. 准确的；精确的,3,/ˈækjərət/
+accuse,v. 指控；谴责,0,/əˈkjuːz/
+achieve,v. 达到；实现,2,/əˈtʃiːv/
+acknowledge,v. 承认；答谢,3,/əkˈnɑːlɪdʒ/
+acquire,v. 获得；学到,2,/əˈkwaɪər/
+adapt,v. 适应；改编,3,/əˈdæpt/
+adequate,adj. 充足的；适当的,2,/ˈædɪkwət/
+adjust,v. 调整；调节,2,/əˈdʒʌst/
+administration,n. 管理；行政部门,2,/ədˌmɪnɪˈstreɪʃn/
+admit,v. 承认；准许进入,0,/ədˈmɪt/
+adopt,v. 采用；收养,2,/əˈdɑːpt/
+advance,n. & v. 前进；进步,2,/ədˈvæns/
+advantage,n. 优势；利益,2,/ədˈvæntɪdʒ/
+advocate,v. 提倡；主张 n. 拥护者,2,/ˈædvəkeɪt/
+afford,v. 买得起；承担得起,2,/əˈfɔːrd/
+agency,n. 代理机构；中介,2,/ˈeɪdʒənsi/
+aggressive,adj. 侵略性的；有进取心的,0,/əˈɡrɛsɪv/
+allocate,v. 分配；拨出,2,/ˈæləkeɪt/
