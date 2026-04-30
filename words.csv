@@ -1,31 +1,31 @@
-word,definition,wrong_count,phonetic
-abandon,v. 放弃；抛弃,0,/əˈbændən/
-ability,n. 能力；才能,2,/əˈbɪləti/
-absolute,adj. 绝对的；完全的,2,/ˈæbsəluːt/
-absorb,v. 吸收；吸引,3,/əbˈzɔːrb/
-abstract,adj. 抽象的 n. 摘要,0,/ˈæbstrækt/
-academic,adj. 学术的；学院的,2,/ˌækəˈdɛmɪk/
-access,n. 通道；入口 v. 接近,2,/ˈæksɛs/
-accommodate,v. 容纳；提供住宿,3,/əˈkɑːmədeɪt/
-accompany,v. 陪伴；伴随,2,/əˈkʌmpəni/
-accomplish,v. 完成；实现,2,/əˈkɑːmplɪʃ/
-account,n. 账户；解释 v. 说明,2,/əˈkaʊnt/
-accumulate,v. 积累；聚集,2,/əˈkjuːmjəleɪt/
-accurate,adj. 准确的；精确的,3,/ˈækjərət/
-accuse,v. 指控；谴责,0,/əˈkjuːz/
-achieve,v. 达到；实现,2,/əˈtʃiːv/
-acknowledge,v. 承认；答谢,3,/əkˈnɑːlɪdʒ/
-acquire,v. 获得；学到,2,/əˈkwaɪər/
-adapt,v. 适应；改编,3,/əˈdæpt/
-adequate,adj. 充足的；适当的,2,/ˈædɪkwət/
-adjust,v. 调整；调节,2,/əˈdʒʌst/
-administration,n. 管理；行政部门,2,/ədˌmɪnɪˈstreɪʃn/
-admit,v. 承认；准许进入,0,/ədˈmɪt/
-adopt,v. 采用；收养,2,/əˈdɑːpt/
-advance,n. & v. 前进；进步,2,/ədˈvæns/
-advantage,n. 优势；利益,2,/ədˈvæntɪdʒ/
-advocate,v. 提倡；主张 n. 拥护者,2,/ˈædvəkeɪt/
-afford,v. 买得起；承担得起,2,/əˈfɔːrd/
-agency,n. 代理机构；中介,2,/ˈeɪdʒənsi/
-aggressive,adj. 侵略性的；有进取心的,0,/əˈɡrɛsɪv/
-allocate,v. 分配；拨出,2,/ˈæləkeɪt/
+word,definition,wrong_count,phonetic,frequency_tier
+abandon,v. 放弃；抛弃,0,/əˈbændən/,🟡 中高频进阶词汇
+ability,n. 能力；才能,2,/əˈbɪləti/,🟠 中频拓展词汇
+absolute,adj. 绝对的；完全的,2,/ˈæbsəluːt/,🟠 中频拓展词汇
+absorb,v. 吸收；吸引,3,/əbˈzɔːrb/,🟠 中频拓展词汇
+abstract,adj. 抽象的 n. 摘要,1,/ˈæbstrækt/,🟡 中高频进阶词汇
+academic,adj. 学术的；学院的,2,/ˌækəˈdɛmɪk/,🟡 中高频进阶词汇
+access,n. 通道；入口 v. 接近,2,/ˈæksɛs/,🔴 低频生僻词汇
+accommodate,v. 容纳；提供住宿,4,/əˈkɑːmədeɪt/,🔴 低频生僻词汇
+accompany,v. 陪伴；伴随,2,/əˈkʌmpəni/,🟢 高频核心词汇
+accomplish,v. 完成；实现,3,/əˈkɑːmplɪʃ/,🟢 高频核心词汇
+account,n. 账户；解释 v. 说明,2,/əˈkaʊnt/,🔴 低频生僻词汇
+accumulate,v. 积累；聚集,3,/əˈkjuːmjəleɪt/,🟠 中频拓展词汇
+accurate,adj. 准确的；精确的,3,/ˈækjərət/,🟡 中高频进阶词汇
+accuse,v. 指控；谴责,0,/əˈkjuːz/,🟡 中高频进阶词汇
+achieve,v. 达到；实现,2,/əˈtʃiːv/,🔴 低频生僻词汇
+acknowledge,v. 承认；答谢,4,/əkˈnɑːlɪdʒ/,🟢 高频核心词汇
+acquire,v. 获得；学到,2,/əˈkwaɪər/,🟡 中高频进阶词汇
+adapt,v. 适应；改编,4,/əˈdæpt/,🟢 高频核心词汇
+adequate,adj. 充足的；适当的,2,/ˈædɪkwət/,🔴 低频生僻词汇
+adjust,v. 调整；调节,2,/əˈdʒʌst/,🔴 低频生僻词汇
+administration,n. 管理；行政部门,3,/ədˌmɪnɪˈstreɪʃn/,🔴 低频生僻词汇
+admit,v. 承认；准许进入,1,/ədˈmɪt/,🟠 中频拓展词汇
+adopt,v. 采用；收养,2,/əˈdɑːpt/,🟠 中频拓展词汇
+advance,n. & v. 前进；进步,3,/ədˈvæns/,🟢 高频核心词汇
+advantage,n. 优势；利益,2,/ədˈvæntɪdʒ/,🟡 中高频进阶词汇
+advocate,v. 提倡；主张 n. 拥护者,2,/ˈædvəkeɪt/,🟠 中频拓展词汇
+afford,v. 买得起；承担得起,2,/əˈfɔːrd/,🔴 低频生僻词汇
+agency,n. 代理机构；中介,3,/ˈeɪdʒənsi/,🟢 高频核心词汇
+aggressive,adj. 侵略性的；有进取心的,0,/əˈɡrɛsɪv/,🟢 高频核心词汇
+allocate,v. 分配；拨出,3,/ˈæləkeɪt/,🔴 低频生僻词汇
