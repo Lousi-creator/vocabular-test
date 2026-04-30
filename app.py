@@ -7,7 +7,6 @@ import sqlite3
 import hashlib 
 from gtts import gTTS
 from openai import OpenAI
-from dotenv import load_dotenv
 
 # ==========================================
 # 0. 网页全局设置 
