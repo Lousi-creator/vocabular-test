@@ -95,7 +95,7 @@ def create_user(username, password):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     try:
-        status = 'active' if username == os.getenv("ADMIN_USERNAME", "admin") else 'pending'
+        status = 'active' if username == st.secrets.get("ADMIN_USERNAME", "admin") else 'pending'
         c.execute('INSERT INTO users (username, password, credits, status) VALUES (?, ?, ?, ?)', (username, make_hash(password), 3, status))
         conn.commit()
         return True
@@ -263,7 +263,7 @@ with st.sidebar:
                     else:
                         st.session_state.current_user = log_user
                         st.session_state.user_credits = credits
-                        st.session_state.is_admin = (log_user == os.getenv("ADMIN_USERNAME", "admin"))
+                        st.session_state.is_admin = (log_user == st.secrets.get("ADMIN_USERNAME", "admin"))
                         st.success("登录成功！")
                         st.rerun()
                 else:
@@ -430,8 +430,7 @@ else:
                 else:
                     with st.spinner("🧠 AI 导师正在批阅..."):
                         try:
-                            load_dotenv()
-                            active_api_key = user_api_key if user_api_key else os.getenv("DEEPSEEK_API_KEY")
+                            active_api_key = user_api_key if user_api_key else st.secrets.get("DEEPSEEK_API_KEY", "")
                             if not active_api_key: st.error("❌ 找不到 API 密钥！")
                             else:
                                 client = OpenAI(api_key=active_api_key, base_url="https://api.deepseek.com")
