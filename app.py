@@ -1,20 +1,68 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 import os
 import time  
 import re  
 import sqlite3  
 import hashlib 
-import json 
-from gtts import gTTS
+import json
+import requests
+import base64
 from openai import OpenAI
-from dotenv import load_dotenv
-from dotenv import load_dotenv
-load_dotenv()  # 激活 .env 文件
+
+def get_secret(key, default=""):
+    try:
+        return st.secrets[key]
+    except Exception:
+        val = os.getenv(key)
+        if val is not None:
+            return val
+        try:
+            with open(".env", "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        v = v.strip().strip('"').strip("'")
+                        if k.strip() == key:
+                            return v
+        except Exception:
+            pass
+        return default
+
+def baidu_ocr(image_bytes):
+    api_key = get_secret("BAIDU_OCR_API_KEY")
+    secret_key = get_secret("BAIDU_OCR_SECRET_KEY")
+    if not api_key or not secret_key:
+        return None, "请先在 .env 或 Streamlit Secrets 中配置 BAIDU_OCR_API_KEY 和 BAIDU_OCR_SECRET_KEY"
+    try:
+        token_url = f"https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id={api_key}&client_secret={secret_key}"
+        token_resp = requests.post(token_url).json()
+        access_token = token_resp.get("access_token")
+        if not access_token:
+            return None, f"获取百度 Access Token 失败：{token_resp}"
+        img_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        ocr_url = f"https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token={access_token}"
+        ocr_resp = requests.post(ocr_url, data={
+            "image": img_base64,
+            "language_type": "CHN_ENG",
+            "detect_direction": "true",
+            "paragraph": "true"
+        }).json()
+        if "error_code" in ocr_resp:
+            return None, f"OCR 识别失败：{ocr_resp.get('error_msg', '未知错误')}"
+        words = ocr_resp.get("words_result", [])
+        if not words:
+            return "", "未识别到文字，请确保照片清晰且包含中英文内容"
+        text = "\n".join([w["words"] for w in words])
+        return text, None
+    except Exception as e:
+        return None, f"OCR 调用异常：{str(e)}"
+
 # ==========================================
 # 0. 网页全局设置 
 # ==========================================
-st.set_page_config(page_title="极客词汇系统", page_icon="✨", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="逐梦英语 · AI智能备考", page_icon="🎯", layout="centered", initial_sidebar_state="collapsed")
 
 # ==========================================
 # 0.5 终极前端黑魔法 (UI 大重构 - 护眼暗黑毛玻璃大厅)
@@ -190,21 +238,22 @@ st.markdown(BASE_CSS, unsafe_allow_html=True)
 
 PERFECT_CSS_TEMPLATE = """
 <style>
-@keyframes criticalHit_UID {
-    0% { transform: translate(-50%, -50%) scale(0.1); opacity: 0; }
-    15% { transform: translate(-50%, -50%) scale(1.4) skewX(-15deg); opacity: 1; text-shadow: 5px 5px 0px #FF0000, -5px -5px 0px #00FFFF; }
-    30% { transform: translate(-50%, -50%) scale(1) skewX(5deg); opacity: 1; text-shadow: 0px 0px 30px #FF8C00; }
-    70% { transform: translate(-50%, -50%) scale(1.1) skewX(0deg); opacity: 1; text-shadow: 0px 0px 15px #FFD700; }
-    100% { transform: translate(-50%, -50%) scale(2.5); opacity: 0; filter: blur(10px); }
+@keyframes perfectFade_UID {
+    0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0; }
+    20% { transform: translate(-50%, -50%) scale(1.05); opacity: 1; }
+    80% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+    100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
 }
-.monster-kill-text-UID {
-    position: fixed; top: 35%; left: 50%; z-index: 999999;
-    font-family: 'Impact', sans-serif; font-size: 110px; color: #FFDF00;
-    font-style: italic; font-weight: 900; -webkit-text-stroke: 4px #D32F2F;
-    pointer-events: none; animation: criticalHit_UID 0.9s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+.perfect-text-UID {
+    position: fixed; top: 30%; left: 50%; z-index: 999999;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 64px; font-weight: 900; color: #22c55e;
+    letter-spacing: 8px;
+    pointer-events: none;
+    animation: perfectFade_UID 1.2s ease-out forwards;
 }
 </style>
-<div class="monster-kill-text-UID">PERFECT!</div>
+<div class="perfect-text-UID">✓ 正确</div>
 """
 
 # ==========================================
@@ -236,11 +285,22 @@ def init_db():
             PRIMARY KEY (username, mode, tier)
         )
     ''')
+    
+    # 【核心新增】：用户专属错题库表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_wrong_words (
+            username TEXT,
+            word TEXT,
+            wrong_count INTEGER,
+            PRIMARY KEY (username, word)
+        )
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
+# --- 进度存档相关 ---
 def save_progress(username, mode, tier, q_list):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
@@ -262,6 +322,40 @@ def load_progress(username, mode, tier):
         return json.loads(row[0])
     return []
 
+# --- 【新增：千人千面错题引擎】 ---
+def get_user_wrong_words(username):
+    """获取指定用户的专属错题字典 {word: count}"""
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('SELECT word, wrong_count FROM user_wrong_words WHERE username = ? AND wrong_count > 0', (username,))
+    data = c.fetchall()
+    conn.close()
+    return {row[0]: row[1] for row in data}
+
+def update_user_wrong_word(username, word, is_correct, mode):
+    """静默更新用户的错题次数"""
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('SELECT wrong_count FROM user_wrong_words WHERE username = ? AND word = ?', (username, word))
+    row = c.fetchone()
+    current_count = row[0] if row else 0
+
+    if is_correct:
+        if mode == "错题大扫除":
+            new_count = 0  # 只有在错题本模式答对，才将其彻底消灭
+        else:
+            new_count = current_count
+    else:
+        new_count = current_count + 1
+        
+    c.execute('''
+        REPLACE INTO user_wrong_words (username, word, wrong_count)
+        VALUES (?, ?, ?)
+    ''', (username, word, new_count))
+    conn.commit()
+    conn.close()
+
+# --- 身份系统 ---
 def make_hash(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
@@ -272,7 +366,7 @@ def create_user(username, password):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     try:
-        status = 'active' if username == st.secrets.get("ADMIN_USERNAME", "admin") else 'pending'
+        status = 'active' if username == get_secret("ADMIN_USERNAME", "admin") else 'pending'
         c.execute('INSERT INTO users (username, password, credits, status) VALUES (?, ?, ?, ?)', (username, make_hash(password), 3, status))
         conn.commit()
         return True
@@ -331,7 +425,25 @@ if not os.path.exists('words.csv'):
 if not os.path.exists('essays.csv'):
     pd.DataFrame([
         {'category': '开头', 'subcategory': '建议信', 'content': 'I am writing to express my views concerning...', 'translation': '我写信是想表达关于……的看法。'},
-        {'category': '结尾', 'subcategory': '通用', 'content': 'Looking forward to your prompt reply.', 'translation': '期待你的及时回复。'}
+        {'category': '开头', 'subcategory': '建议信', 'content': 'Having learned that you are faced with..., I would like to give you some practical tips.', 'translation': '得知你正面临……我想给你一些实用的建议。'},
+        {'category': '开头', 'subcategory': '邀请信', 'content': 'I am writing to invite you to join us in...', 'translation': '我写信是想邀请你加入我们……'},
+        {'category': '开头', 'subcategory': '申请信/自荐信', 'content': 'I am writing to apply for the position of...', 'translation': '我写信是想申请……的职位。'},
+        {'category': '开头', 'subcategory': '感谢信', 'content': 'I am writing to convey my heartfelt gratitude for...', 'translation': '我写信是为了表达对……由衷的感谢。'},
+        {'category': '开头', 'subcategory': '道歉信', 'content': 'I am writing to offer my sincere apology for...', 'translation': '我写信是想就……表达我诚挚的道歉。'},
+        {'category': '开头', 'subcategory': '演讲稿', 'content': 'It is a great privilege for me to stand here and address the topic of...', 'translation': '很荣幸站在这里谈论……的话题。'},
+        {'category': '正文过渡', 'subcategory': '建议信', 'content': 'Here are several suggestions that you may find helpful.', 'translation': '以下几条建议你可能会觉得有用。'},
+        {'category': '正文过渡', 'subcategory': '通用过渡', 'content': 'Needless to say, it is of vital importance for us to take immediate action.', 'translation': '毋庸置疑，我们立即采取行动至关重要。'},
+        {'category': '结尾', 'subcategory': '建议信', 'content': 'I sincerely hope that my suggestions will be of some help to you.', 'translation': '我真诚希望我的建议能对你有所帮助。'},
+        {'category': '结尾', 'subcategory': '邀请信', 'content': 'I am convinced that your participation will add great brilliance to our activity.', 'translation': '我深信你的参与将为我们的活动增光添彩。'},
+        {'category': '结尾', 'subcategory': '通用', 'content': 'Looking forward to your prompt reply.', 'translation': '期待你的及时回复。'},
+        {'category': '结尾', 'subcategory': '通用', 'content': 'Only by doing so can we embrace a brighter and more promising future.', 'translation': '唯有如此，我们才能拥抱一个更加光明灿烂的未来。（倒装句）'},
+        {'category': '万能衔接', 'subcategory': '并列递进', 'content': 'To begin with / What is more / Last but not least', 'translation': '首先 / 更重要的是 / 最后但同样重要的是'},
+        {'category': '万能衔接', 'subcategory': '转折对比', 'content': 'On the contrary / However / Alternatively', 'translation': '相反 / 然而 / 或者'},
+        {'category': '万能衔接', 'subcategory': '因果总结', 'content': 'Consequently / As a result / Therefore', 'translation': '因此 / 结果 / 所以'},
+        {'category': '万能衔接', 'subcategory': '举例论证', 'content': 'Take... as an example. It is... that...', 'translation': '以……为例。正是……才……'},
+        {'category': '亮点句型', 'subcategory': '倒装与强调', 'content': 'Only in this way can we truly live up to our potential and embrace a better future.', 'translation': '唯有如此，我们才能真正发挥潜力、拥抱美好未来。（倒装句）'},
+        {'category': '亮点句型', 'subcategory': '强调句', 'content': 'It is consistent practice rather than mere talent that ultimately leads to success.', 'translation': '正是持续练习而非单纯天赋最终通向成功。'},
+        {'category': '亮点句型', 'subcategory': '非谓语/高级句式', 'content': 'Inspired by his words, I made up my mind to pursue my dream with unwavering determination.', 'translation': '受他话语的鼓舞，我下定决心以坚定不移的意志追求梦想。（分词作状语）'},
     ]).to_csv('essays.csv', index=False)
 if not os.path.exists('upgrade.csv'):
     pd.DataFrame([
@@ -344,8 +456,16 @@ if 'current_word' not in st.session_state:
     st.session_state.current_word = ""; st.session_state.chinese_meaning = ""
     st.session_state.phonetic = ""; st.session_state.feedback = ""
     st.session_state.perfect_hit = False; st.session_state.quarantine_list = [] 
+if 'options' not in st.session_state:
+    st.session_state.options = []
+if 'correct_count' not in st.session_state:
+    st.session_state.correct_count = 0
+if 'wrong_count' not in st.session_state:
+    st.session_state.wrong_count = 0
 if 'essay_draft' not in st.session_state:
     st.session_state.essay_draft = ""
+if 'essay_topic' not in st.session_state:
+    st.session_state.essay_topic = ""
 if 'last_ai_time' not in st.session_state:
     st.session_state.last_ai_time = 0.0  
 if 'current_user' not in st.session_state:
@@ -358,6 +478,14 @@ if 'is_admin' not in st.session_state:
     st.session_state.is_admin = False
 if 'current_page' not in st.session_state:
     st.session_state.current_page = 'home'
+if 'listening_test' not in st.session_state:
+    st.session_state.listening_test = None
+if 'listening_q_index' not in st.session_state:
+    st.session_state.listening_q_index = 0
+if 'listening_answers' not in st.session_state:
+    st.session_state.listening_answers = {}
+if 'listening_finished' not in st.session_state:
+    st.session_state.listening_finished = False
 
 def navigate_to(page_name):
     st.session_state.current_page = page_name
@@ -371,16 +499,26 @@ def append_to_draft(text_to_add):
     st.session_state.essay_draft += text_to_add + " "
 
 def reset_task_state():
-    # 【修复点】：彻底抛弃切换时清空隔离名单的旧逻辑，交由实时云同步接管
     st.session_state.feedback = ""          
     st.session_state.current_word = ""      
-    st.session_state.show_balloons = False  
+    st.session_state.show_balloons = False
+    st.session_state.options = []
+    st.session_state.correct_count = 0
+    st.session_state.wrong_count = 0  
 
 def get_next_word(mode, tier):
     df = pd.read_csv('words.csv')
     if 'frequency_tier' not in df.columns: df['frequency_tier'] = "🟢 高频核心词汇"
     if st.session_state.quarantine_list: df = df[~df['word'].isin(st.session_state.quarantine_list)]
-    if mode == "错题大扫除": df = df[df['wrong_count'] > 0]
+    
+    # 【核心升级】：如果是错题大扫除，只抓取该用户专属数据库里的错题
+    if mode == "错题大扫除": 
+        if st.session_state.current_user:
+            wrong_dict = get_user_wrong_words(st.session_state.current_user)
+            df = df[df['word'].isin(wrong_dict.keys())]
+        else:
+            df = pd.DataFrame()
+            
     if tier != "🌍 全库混合 (不分级)": df = df[df['frequency_tier'] == tier]
         
     if df.empty:
@@ -393,30 +531,44 @@ def get_next_word(mode, tier):
     st.session_state.current_word = row['word']
     st.session_state.chinese_meaning = row['definition']
     st.session_state.phonetic = row['phonetic'] if 'phonetic' in row else ""
+    distractor_pool = df[df['word'] != st.session_state.current_word]
+    n_distractors = min(5, len(distractor_pool))
+    distractors = distractor_pool.sample(n=n_distractors)['word'].tolist() if n_distractors > 0 else []
+    options = [st.session_state.current_word] + distractors
+    import random
+    random.shuffle(options)
+    st.session_state.options = options
 
-def check_answer():
-    user_input = st.session_state.user_input.strip().lower()
+def check_answer(selected_word=None):
+    if selected_word is None:
+        selected_word = st.session_state.get("user_input", "").strip().lower()
     mode = st.session_state.mode_selector
     tier = st.session_state.tier_selector 
-    if not user_input or not st.session_state.current_word: return
-    df = pd.read_csv('words.csv')
+    if not selected_word or not st.session_state.current_word: return
+    
     correct_word = st.session_state.current_word
     
-    if user_input == correct_word:
-        st.session_state.perfect_hit = True; st.session_state.feedback = ""      
-        if mode == "错题大扫除": df.loc[df['word'] == correct_word, 'wrong_count'] = 0
+    if selected_word == correct_word:
+        st.session_state.perfect_hit = True; st.session_state.feedback = ""
+        st.session_state.correct_count += 1
+        if st.session_state.current_user:
+            update_user_wrong_word(st.session_state.current_user, correct_word, True, mode)
     else:
         st.session_state.feedback = f"❌ 正确拼写: {correct_word}"
-        df.loc[df['word'] == correct_word, 'wrong_count'] += 1
+        st.session_state.wrong_count += 1
+        if st.session_state.current_user:
+            update_user_wrong_word(st.session_state.current_user, correct_word, False, mode)
         
-    if correct_word not in st.session_state.quarantine_list: 
+    only_quarantine_correct = (mode != "错题大扫除") or (selected_word == correct_word)
+    if correct_word not in st.session_state.quarantine_list and only_quarantine_correct:
         st.session_state.quarantine_list.append(correct_word)
         if st.session_state.current_user:
             save_progress(st.session_state.current_user, mode, tier, st.session_state.quarantine_list)
             
-    df.to_csv('words.csv', index=False)
     st.session_state.user_input = ""
-    get_next_word(mode, tier) 
+    st.session_state.options = []
+    get_next_word(mode, tier)
+    st.rerun() 
 
 # ==========================================
 # 4. 主界面渲染路由引擎
@@ -424,49 +576,64 @@ def check_answer():
 
 if st.session_state.current_user is None:
     st.markdown("""
-    <div style='text-align: center; margin-bottom: 30px;'>
-        <h1 style='font-weight: 900; font-size: 3rem; margin-bottom: 0;'>极客词汇系统<span class='text-highlight'>.</span></h1>
-        <p style='font-size: 1.2rem; margin-top: 5px;'>专注、高效、数据驱动的高考提分引擎</p>
+    <div style='text-align: center; margin-bottom: 24px;'>
+        <h1 style='font-weight: 900; font-size: 3.4rem; margin-bottom: 0; letter-spacing: 2px;'>
+            逐梦英语<span class='text-highlight'>.</span>
+        </h1>
+        <p style='font-size: 1rem; margin-top: 6px; font-style: italic; color: #94a3b8; font-weight: 400;'>
+            Your AI study buddy for Gaokao ✌️
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class='glass-card' style='text-align:center; padding: 20px 24px; margin-bottom: 28px;'>
+        <p style='font-size: 1.1rem; font-weight: 600; color: #f1f5f9; margin: 0 0 6px 0;'>
+            <span style='color: #f59e0b;'>✦</span> Dream big. Study smart. <span style='color: #22c55e;'>Ace it.</span>
+        </p>
+        <p style='font-size: 0.85rem; color: #94a3b8; margin: 0; line-height: 1.7;'>
+            Every word you learn today <br>is a step closer to your dream university 🎓
+        </p>
     </div>
     """, unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        tab_login, tab_reg = st.tabs(["🔑 身份验证", "📝 新用户注册"])
-        
+        tab_login, tab_reg = st.tabs(["👋 Welcome back!", "✨ Join the club"])
+
         with tab_login:
             st.write("<br>", unsafe_allow_html=True)
-            log_user = st.text_input("用户名", key="log_u", placeholder="输入账号")
-            log_pwd = st.text_input("安全密码", type="password", key="log_p", placeholder="••••••••")
+            log_user = st.text_input("Username", key="log_u", placeholder="Enter your username")
+            log_pwd = st.text_input("Password", type="password", key="log_p", placeholder="••••••••")
             st.write("<br>", unsafe_allow_html=True)
-            if st.button("进入系统", use_container_width=True, type="primary"):
+            if st.button("🚀 Let's roll!", use_container_width=True, type="primary"):
                 result = login_user(log_user, log_pwd)
                 if result is not None:
                     credits, status = result
                     if status == 'pending':
-                        st.warning("⏳ 您的账号正在等待管理员审核。")
+                        st.warning("⏳ Hang tight! 管理员还在审核你的账号~")
                     else:
                         st.session_state.current_user = log_user
                         st.session_state.user_credits = credits
-                        st.session_state.is_admin = (log_user == os.getenv("ADMIN_USERNAME", "admin"))
+                        st.session_state.is_admin = (log_user == get_secret("ADMIN_USERNAME", "admin"))
                         st.rerun()
                 else:
-                    st.error("用户名或密码不匹配")
-                    
+                    st.error("Oops! 用户名或密码不对哦~")
+
         with tab_reg:
             st.write("<br>", unsafe_allow_html=True)
-            reg_user = st.text_input("设置用户名", key="reg_u")
-            reg_pwd = st.text_input("设置高强度密码", type="password", key="reg_p")
+            reg_user = st.text_input("Pick a username", key="reg_u", placeholder="Make it cool 😎")
+            reg_pwd = st.text_input("Create a password", type="password", key="reg_p", placeholder="Make it strong 💪")
             st.write("<br>", unsafe_allow_html=True)
-            if st.button("提交注册申请", use_container_width=True):
+            if st.button("🎉 Count me in!", use_container_width=True):
                 if reg_user and reg_pwd:
                     if create_user(reg_user, reg_pwd):
-                        st.success("注册请求已发送！请等待管理员放行。")
+                        st.success("🎉 You're almost there! 等管理员通过就能开练啦~")
                     else:
-                        st.error("该用户名已被其他极客占用")
+                        st.error("Uh-oh! 这个名字被抢了，换一个吧~")
                 else:
-                    st.warning("字段不可为空")
+                    st.warning("Hey, 用户名和密码都得填哦~")
         st.markdown("</div>", unsafe_allow_html=True)
 
 elif st.session_state.current_page == 'home':
@@ -487,7 +654,7 @@ elif st.session_state.current_page == 'home':
             st.rerun()
 
     st.write("<br>", unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.markdown("""
@@ -510,6 +677,17 @@ elif st.session_state.current_page == 'home':
         """, unsafe_allow_html=True)
         if st.button("启动工坊 →", key="nav_essay", use_container_width=True):
             navigate_to('essay')
+    
+    with col3:
+        st.markdown("""
+        <div class='dash-card'>
+            <div style='font-size: 50px; margin-bottom: 15px;'>🎧</div>
+            <h3 style='margin-bottom: 10px;'>听力训练营</h3>
+            <p style='font-size: 0.9rem; margin-bottom: 25px;'>高考真题听力训练，全真模拟 20 题听力考试，即时评分。</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("开始训练 →", key="nav_listening", use_container_width=True):
+            navigate_to('listening')
 
     if st.session_state.is_admin:
         st.write("<br>", unsafe_allow_html=True)
@@ -544,7 +722,6 @@ elif st.session_state.current_page == 'vocab':
     tiers = ["🌍 全库混合 (不分级)", "🟢 高频核心词汇", "🟡 中高频进阶词汇", "🟠 中频拓展词汇", "🔴 低频生僻词汇"]
     tier = st.selectbox("锁定目标层级：", tiers, key="tier_selector", on_change=reset_task_state)
     
-    # 【极致体验更新】：选择框变化时，代码立刻往下执行读取最新存档，无需再点击按钮！
     if st.session_state.current_user:
         st.session_state.quarantine_list = load_progress(st.session_state.current_user, mode, tier)
         
@@ -552,7 +729,6 @@ elif st.session_state.current_page == 'vocab':
     col_start, col_reset = st.columns([3, 1])
     with col_start:
         if st.button("🚀 部署并继续任务", type="primary", use_container_width=True):
-            # 因为上面已经自动完成了 load_progress，所以按钮按下去只需要发新单词即可
             get_next_word(mode, tier)
     with col_reset:
         if st.button("🔄 重置进度", use_container_width=True):
@@ -562,9 +738,12 @@ elif st.session_state.current_page == 'vocab':
             st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
     
+    # 【核心升级】：主进度条精准读取专属错题
     df_prog = pd.read_csv('words.csv')
     if 'frequency_tier' not in df_prog.columns: df_prog['frequency_tier'] = "🟢 高频核心词汇"
-    if mode == "错题大扫除": df_prog = df_prog[df_prog['wrong_count'] > 0]
+    if mode == "错题大扫除":
+        wrong_dict = get_user_wrong_words(st.session_state.current_user)
+        df_prog = df_prog[df_prog['word'].isin(wrong_dict.keys())]
     if tier != "🌍 全库混合 (不分级)": df_prog = df_prog[df_prog['frequency_tier'] == tier]
     total_round_words = len(df_prog)
     completed_words = len(st.session_state.quarantine_list)
@@ -572,7 +751,12 @@ elif st.session_state.current_page == 'vocab':
     if total_round_words > 0:
         progress_ratio = min(completed_words / total_round_words, 1.0)
         st.progress(progress_ratio)
-        st.markdown(f"<div style='text-align:center; font-size:0.9rem; margin-top:10px;'>节点肃清进度: <span class='text-highlight'>{completed_words}</span> / {total_round_words}</div>", unsafe_allow_html=True)
+        total_answered = st.session_state.correct_count + st.session_state.wrong_count
+        if total_answered > 0:
+            acc = round(st.session_state.correct_count / total_answered * 100)
+            st.markdown(f"<div style='text-align:center; font-size:0.9rem; margin-top:10px;'>节点肃清进度: <span class='text-highlight'>{completed_words}</span> / {total_round_words} &nbsp;|&nbsp; 准确率: <span class='text-success'>✅ {st.session_state.correct_count}</span> <span class='text-danger'>❌ {st.session_state.wrong_count}</span> &nbsp;({acc}%)</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div style='text-align:center; font-size:0.9rem; margin-top:10px;'>节点肃清进度: <span class='text-highlight'>{completed_words}</span> / {total_round_words}</div>", unsafe_allow_html=True)
     else:
         st.info("当前区域安全，无目标词汇。")
 
@@ -596,16 +780,168 @@ elif st.session_state.current_page == 'vocab':
             <div style='font-size: 1.2rem; color: #64748b; font-family: monospace;'>{st.session_state.phonetic}</div>
         </div>
         """, unsafe_allow_html=True)
-        tts = gTTS(st.session_state.current_word, lang='en')
-        tts.save("temp.mp3"); st.audio("temp.mp3", format="audio/mp3", autoplay=True)
-        st.text_input(" ", key="user_input", on_change=check_answer, placeholder="在此输入拦截指令 (拼写)...", label_visibility="collapsed")
+        audio_url = f"https://dict.youdao.com/dictvoice?audio={st.session_state.current_word}&type=2"
+        st.audio(audio_url, format="audio/mp3", autoplay=False)
+        if st.session_state.options:
+            st.markdown("<p style='text-align:center; color: #94a3b8; font-size: 0.85rem; margin-top: 15px;'>请选择正确拼写：</p>", unsafe_allow_html=True)
+            labels = ['A', 'B', 'C', 'D', 'E', 'F']
+            rows = [st.columns(3) for _ in range(2)]
+            for i, word in enumerate(st.session_state.options):
+                r, c = divmod(i, 3)
+                label = labels[i] if i < len(labels) else str(i+1)
+                if rows[r][c].button(f"{label}. {word}", key=f"opt_{i}_{word[:4]}", use_container_width=True):
+                    check_answer(word)
+        else:
+            st.text_input(" ", key="user_input", on_change=check_answer, placeholder="在此输入拦截指令 (拼写)...", label_visibility="collapsed")
 
-    with st.expander("📡 展开错题雷达扫描结果", expanded=False):
-        df_wrong = pd.read_csv('words.csv')
-        df_wrong = df_wrong[df_wrong['wrong_count'] > 0].sort_values(by='wrong_count', ascending=False)
-        if df_wrong.empty: st.write("雷达未发现高危词汇")
-        for _, row in df_wrong.iterrows():
-            st.markdown(f"<div style='background:rgba(0,0,0,0.3); padding:10px 15px; border-radius:12px; margin-bottom:8px; border-left: 3px solid #ef4444;'><b style='color:#e2e8f0;'>{row['word']}</b> <span style='color:#94a3b8; font-size:0.9rem; margin-left:10px;'>{row['definition']}</span><span style='float:right; color:#ef4444; font-size:0.8rem; font-weight:bold;'>威胁度 {row['wrong_count']}</span></div>", unsafe_allow_html=True)
+    # 【核心升级】：底部错题雷达现在只显示该用户自己的专属错题
+    with st.expander("📡 展开专属错题雷达扫描结果", expanded=False):
+        wrong_dict = get_user_wrong_words(st.session_state.current_user)
+        if not wrong_dict: 
+            st.write("雷达未发现高危词汇，错题本空空如也！")
+        else:
+            df_words = pd.read_csv('words.csv')
+            df_wrong = df_words[df_words['word'].isin(wrong_dict.keys())].copy()
+            df_wrong['wrong_count'] = df_wrong['word'].map(wrong_dict)
+            df_wrong = df_wrong.sort_values(by='wrong_count', ascending=False)
+            
+            for _, row in df_wrong.iterrows():
+                count = row['wrong_count']
+                if count >= 5:
+                    badge_color = '#ef4444'; badge_text = '🔴 高危'
+                elif count >= 3:
+                    badge_color = '#f59e0b'; badge_text = '🟡 注意'
+                elif count >= 2:
+                    badge_color = '#94a3b8'; badge_text = '🟠 观察'
+                else:
+                    badge_color = '#10b981'; badge_text = '🟢 轻微'
+                st.markdown(f"<div style='background:rgba(0,0,0,0.3); padding:10px 15px; border-radius:12px; margin-bottom:8px; border-left: 4px solid {badge_color};'><b style='color:#e2e8f0;'>{row['word']}</b> <span style='color:#94a3b8; font-size:0.9rem; margin-left:10px;'>{row['definition']}</span><span style='float:right; color:{badge_color}; font-size:0.8rem; font-weight:bold;'>{badge_text} ×{count}</span></div>", unsafe_allow_html=True)
+
+elif st.session_state.current_page == 'listening':
+    st.markdown("<div class='glass-card' style='text-align:center; padding: 30px;'>", unsafe_allow_html=True)
+    st.markdown("<h2 style='margin-bottom: 5px;'>🎧 听力训练营</h2>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.write("<br>", unsafe_allow_html=True)
+    
+    if st.button("🏠 返回大厅", key="back_from_listening", use_container_width=True):
+        st.session_state.listening_test = None
+        st.session_state.listening_q_index = 0
+        st.session_state.listening_answers = {}
+        st.session_state.listening_finished = False
+        navigate_to('home')
+    
+    st.write("<br>", unsafe_allow_html=True)
+    
+    if os.path.exists('listening_tests.csv'):
+        df_tests = pd.read_csv('listening_tests.csv')
+        test_names = df_tests['test'].unique().tolist()
+        
+        if st.session_state.listening_test is None:
+            st.markdown("<div class='glass-card' style='padding: 30px; text-align:center;'>", unsafe_allow_html=True)
+            st.markdown("<h3>📋 选择试卷</h3>", unsafe_allow_html=True)
+            st.write("<br>", unsafe_allow_html=True)
+            for tname in test_names:
+                df_t = df_tests[df_tests['test'] == tname]
+                total_q = len(df_t)
+                if st.button(f"📻 {tname}（共 {total_q} 题）", key=f"sel_{tname}", use_container_width=True):
+                    st.session_state.listening_test = tname
+                    st.session_state.listening_q_index = 0
+                    st.session_state.listening_answers = {}
+                    st.session_state.listening_finished = False
+                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            if st.session_state.is_admin:
+                st.write("<br>", unsafe_allow_html=True)
+                st.markdown("<div class='glass-card' style='padding: 20px; text-align:center;'>", unsafe_allow_html=True)
+                st.markdown("<h4>📤 上传听力音频</h4>", unsafe_allow_html=True)
+                uploaded_audio = st.file_uploader("上传 MP3 或 WAV 音频文件", type=["mp3", "wav"], key="audio_upload", label_visibility="collapsed")
+                if uploaded_audio is not None:
+                    os.makedirs('listening_audio', exist_ok=True)
+                    file_path = os.path.join('listening_audio', uploaded_audio.name)
+                    with open(file_path, 'wb') as f:
+                        f.write(uploaded_audio.getvalue())
+                    st.success(f"✅ {uploaded_audio.name} 上传成功！")
+                st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            df_test = df_tests[df_tests['test'] == st.session_state.listening_test].sort_values(by=['section', 'q_num'])
+            total_q = len(df_test)
+            current_idx = st.session_state.listening_q_index
+            
+            if st.session_state.listening_finished:
+                correct_count = 0
+                for idx, (_, row) in enumerate(df_test.iterrows()):
+                    q_idx = str(idx)
+                    if q_idx in st.session_state.listening_answers and st.session_state.listening_answers[q_idx] == row['answer']:
+                        correct_count += 1
+                score_pct = round(correct_count / total_q * 100)
+                st.markdown("<div class='glass-card' style='padding: 40px; text-align:center;'>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size: 80px;'>📊</div>", unsafe_allow_html=True)
+                if score_pct >= 90:
+                    st.markdown(f"<h2 style='color: #22c55e;'>🎉 优秀！正确 {correct_count}/{total_q} ({score_pct}%)</h2>", unsafe_allow_html=True)
+                elif score_pct >= 70:
+                    st.markdown(f"<h2 style='color: #f59e0b;'>👍 良好！正确 {correct_count}/{total_q} ({score_pct}%)</h2>", unsafe_allow_html=True)
+                elif score_pct >= 50:
+                    st.markdown(f"<h2 style='color: #f97316;'>📚 及格！正确 {correct_count}/{total_q} ({score_pct}%)</h2>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<h2 style='color: #ef4444;'>💪 继续加油！正确 {correct_count}/{total_q} ({score_pct}%)</h2>", unsafe_allow_html=True)
+                st.write("<br>", unsafe_allow_html=True)
+                if st.button("🔄 重新答题", use_container_width=True):
+                    st.session_state.listening_q_index = 0
+                    st.session_state.listening_answers = {}
+                    st.session_state.listening_finished = False
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                row = df_test.iloc[current_idx]
+                st.markdown("<div class='glass-card' style='padding: 30px;'>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color: #94a3b8; font-size: 0.85rem;'>Section: {row['section']} · 第 {row['q_num']} 题 / 共 {total_q} 题</p>", unsafe_allow_html=True)
+                st.progress((current_idx) / total_q)
+                st.write("<br>", unsafe_allow_html=True)
+                
+                audio_path = os.path.join('listening_audio', row['audio']) if pd.notna(row.get('audio', None)) else None
+                if audio_path and os.path.exists(audio_path):
+                    st.audio(audio_path, format="audio/mp3")
+                    with st.expander("📝 点击查看对话原文", expanded=False):
+                        st.markdown(f"<p style='color:#cbd5e1; line-height:1.8;'>{row['content']}</p>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<p style='color:#cbd5e1; line-height:1.8; background:rgba(0,0,0,0.3); padding:15px; border-radius:10px; margin-bottom:15px;'>{row['content']}</p>", unsafe_allow_html=True)
+                    st.info("📂 管理员可上传音频文件，开启真实听力体验")
+                
+                st.markdown(f"<h4 style='color:#f8fafc; margin-top: 20px;'>{row['question']}</h4>", unsafe_allow_html=True)
+                st.write("<br>", unsafe_allow_html=True)
+                
+                saved_answer = st.session_state.listening_answers.get(str(current_idx), None)
+                available_opts = [l for l in ['A', 'B', 'C', 'D'] if l in row.index and pd.notna(row[l]) and str(row[l]).strip() != '']
+                for opt_letter in available_opts:
+                    opt_text = row[opt_letter]
+                    is_selected = (saved_answer == opt_letter)
+                    btn_label = f"{'✅ ' if is_selected else ''}{opt_letter}. {opt_text}"
+                    btn_style = "primary" if is_selected else "secondary"
+                    if st.button(btn_label, key=f"lq_{current_idx}_{opt_letter}", use_container_width=True, type=btn_style):
+                        st.session_state.listening_answers[str(current_idx)] = opt_letter
+                        st.rerun()
+                
+                st.write("<br>", unsafe_allow_html=True)
+                col_prev, col_next = st.columns(2)
+                with col_prev:
+                    if current_idx > 0:
+                        if st.button("⬅ 上一题", use_container_width=True):
+                            st.session_state.listening_q_index -= 1
+                            st.rerun()
+                with col_next:
+                    next_label = "交卷 📋" if current_idx == total_q - 1 else "下一题 ➡"
+                    if st.button(next_label, use_container_width=True):
+                        if current_idx < total_q - 1:
+                            st.session_state.listening_q_index += 1
+                            st.rerun()
+                        else:
+                            st.session_state.listening_finished = True
+                            st.rerun()
+                
+                st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.error("未找到听力题库文件。")
 
 elif st.session_state.current_page == 'essay':
     st.markdown("<div class='back-btn'>", unsafe_allow_html=True)
@@ -615,7 +951,37 @@ elif st.session_state.current_page == 'essay':
     st.markdown("<h2 style='text-align: center; margin-bottom: 30px;'>✍️ 高考文书锻造工坊</h2>", unsafe_allow_html=True)
     
     with st.container():
-        st.text_area(" ", height=250, key="essay_draft", placeholder="在此输入你的草稿...", label_visibility="collapsed")
+        st.markdown("<p style='color: #94a3b8; font-size: 0.85rem; margin-bottom: 5px;'>📋 作文题目（中文）：</p>", unsafe_allow_html=True)
+        st.text_area(" ", height=80, key="essay_topic", placeholder="例如：假定你是李华，你的英国朋友Peter来信询问你校学生体育运动情况。请给他回信...", label_visibility="collapsed")
+        with st.expander("📸 拍照识别题目", expanded=False):
+            topic_img = st.file_uploader("📷 拍照或选择图片", type=["jpg", "jpeg", "png"], key="ocr_topic", label_visibility="collapsed")
+            if topic_img is not None:
+                st.image(topic_img, width=300)
+                if st.button("🔍 识别题目文字", key="btn_topic", use_container_width=True):
+                    with st.spinner("AI 正在识别题目文字..."):
+                        topic_ocr_text, topic_ocr_error = baidu_ocr(topic_img.getvalue())
+                    if topic_ocr_error:
+                        st.error(topic_ocr_error)
+                    else:
+                        st.session_state.essay_topic = topic_ocr_text
+                        st.success(f"识别完成！已自动填入上方题目栏")
+                        st.rerun()
+        st.write("<br>", unsafe_allow_html=True)
+        with st.expander("📸 拍照识别作文", expanded=False):
+            ocr_image = st.file_uploader("📷 拍照或选择图片", type=["jpg", "jpeg", "png"], key="ocr_essay", label_visibility="collapsed")
+            if ocr_image is not None:
+                st.image(ocr_image, width=300)
+                if st.button("🔍 识别作文文字", key="btn_essay", use_container_width=True):
+                    with st.spinner("AI 正在识别作文文字..."):
+                        ocr_text, ocr_error = baidu_ocr(ocr_image.getvalue())
+                    if ocr_error:
+                        st.error(ocr_error)
+                    else:
+                        st.session_state.essay_draft = ocr_text
+                        st.success(f"识别完成！共 {len(ocr_text)} 个字符，已自动填入下方作文栏")
+                        st.rerun()
+        st.markdown("<p style='color: #94a3b8; font-size: 0.85rem; margin-bottom: 5px;'>📝 你的英文作文：</p>", unsafe_allow_html=True)
+        st.text_area(" ", height=250, key="essay_draft", placeholder="在此输入你的英文草稿...", label_visibility="collapsed")
         
         st.write("<br>", unsafe_allow_html=True)
         col_scan, col_ai, col_clear = st.columns([2, 2, 1])
@@ -624,7 +990,7 @@ elif st.session_state.current_page == 'essay':
         with col_ai:
             ai_btn = st.button("🤖 召唤 DeepSeek 导师", type="primary", use_container_width=True)
         with col_clear:
-            if st.button("🗑️ 清空", use_container_width=True): st.session_state.essay_draft = ""; st.rerun()
+            if st.button("🗑️ 清空", use_container_width=True): st.session_state.essay_draft = ""; st.session_state.essay_topic = ""; st.rerun()
             
         if scan_btn and st.session_state.essay_draft.strip():
             draft_text = st.session_state.essay_draft.lower()
@@ -654,38 +1020,69 @@ elif st.session_state.current_page == 'essay':
             else:
                 with st.spinner("🧠 神经元网络正在解构你的文章..."):
                     try:
-                        active_api_key = user_api_key if user_api_key else os.getenv("DEEPSEEK_API_KEY", "")
+                        active_api_key = user_api_key if user_api_key else get_secret("DEEPSEEK_API_KEY")
                         if not active_api_key: st.error("未检测到 API 密钥，连接中断。")
                         else:
                             client = OpenAI(api_key=active_api_key, base_url="https://api.deepseek.com")
                             prompt = f"""
                             你现在是【浙江省高考英语阅卷组长】，极其严厉、专业且毒舌。你的任务是对下面这篇 80 词左右的高考应用文草稿进行降维打击式的批改。
                             
-                            【浙江卷评分标准（满分 15 分）】：
-                            - 第五档(13-15分)：全覆盖要点，使用较多复杂语法和高级词汇，极少错误，逻辑丝滑。
-                            - 第四档(10-12分)：覆盖主要要点，语法词汇基本满足要求，有基础连贯性。
-                            - 第三档(7-9分)：漏掉部分要点，词汇语法单一，有一些错误但不影响理解。
-                            - 低分档(0-6分)：不知所云，错误百出。
-                            - 特殊说明：如果字数不达标直接扣除大部分分数
+                            【本次作文题目（中文）】：
+                            {st.session_state.essay_topic if st.session_state.essay_topic.strip() else '（学生未提供题目）'}
+
+                            【浙江卷评分标准（满分 15 分）—— 五大维度对照表】：
+                            | 档次 | 分数 | 内容覆盖度 | 词汇水平 | 语法复杂度 | 逻辑与衔接 |
+                            |------|------|-----------|---------|-----------|-----------|
+                            | 五档 | 13-15 | 全覆盖所有要点，细节充实 | 地道高级词汇≥5个，精准无废词 | 熟练运用倒装/强调/非谓语/从句等≥3类高级结构 | 衔接丝滑，段落浑然一体 |
+                            | 四档 | 10-12 | 覆盖主要要点(≥80%) | 词汇基本准确，偶用高级词 | 有少量复合句，尝试使用高级语法 | 基础连贯，有过渡词 |
+                            | 三档 | 7-9 | 漏掉1-2个要点 | 词汇单一重复，口语化严重 | 多为简单句，偶有从句 | 衔接生硬，跳脱感明显 |
+                            | 二档 | 4-6 | 要点缺失严重(≤50%) | 大量基础词汇错误 | 几乎全是简单句 | 逻辑混乱，前言不搭后语 |
+                            | 一档 | 0-3 | 完全离题或未完成 | 词不达意 | 无完整句子 | 无法阅读 |
+                            
+                            【🛑 零分红线 — 遇到以下情况直接打 0 分，不要犹豫】：
+                            - 字数极少（少于 20 个词）
+                            - 只写了两三句话敷衍了事
+                            - 照抄题目原文或前面的阅读理解段落
+                            - 完全空白或用中文胡乱应付
+                            
+                            - **重要**：请根据上方作文题目判断学生是否覆盖了所有题目要点，要点遗漏必须扣分！
 
                             【执行工作流（严格按此结构输出）】：
-                            
-                            ### 📊 一、 判卷定档
-                            - **预估分数**：X/15
-                            - **定档理由**：一针见血地指出为什么给这个分数（别跟我客气，直击痛点）。
 
-                            ### 🔪 二、 致命雷区排查
-                            （如果没有错误，此项可写“基础尚可，无致命语法硬伤”。如果有，请列出：）
-                            - 找出所有的时态错误、主谓不一致、中式英语（Chinglish）、以及烂大街的低级词汇。
-                            - 格式：`原句错误` ❌ -> `诊断说明`。
-                            
-                            ### 💎 三、 满分升格示范 (The Masterpiece)
-                            这是你的核心任务！请在保持学生原意的前提下，重写这篇应用文。
+                            ### 📊 一、判卷定档
+                            - **预估总分**：X/15
+                            - **定档理由**：一针见血地指出为什么给这个分数。**必须对照上方的作文题目要求**，指明哪些要点覆盖了、哪些遗漏了。
+
+                            ### 📊 二、分项得分明细
+                            | 评分维度 | 满分 | 实际得分 | 扣分原因 |
+                            |---------|------|---------|---------|
+                            | 内容要点覆盖 | 5 | X | （一句说清） |
+                            | 词汇丰富与精准 | 4 | X | （一句说清） |
+                            | 语法结构水平 | 3 | X | （一句说清） |
+                            | 逻辑连贯与衔接 | 2 | X | （一句说清） |
+                            | 格式与书写规范 | 1 | X | （一句说清） |
+
+                            ### 👨‍🏫 三、阅卷组长毒舌手记
+                            （用 2-3 句辛辣的、像高三老师骂人一样的语气，直击这篇文章最致命的死穴。不要假客气，越毒越好。）
+
+                            ### 🔪 四、致命雷区排查
+                            （如果没有错误，此项可写"基础尚可，无致命语法硬伤"。如果有，请逐项列出：）
+                            - 找出所有的时态错误、主谓不一致、中式英语（Chinglish）、拼写错误、以及烂大街的低级词汇。
+                            - 格式：`原句错误` ❌ → `诊断说明`。
+
+                            ### 💎 五、满分升格示范 (The Masterpiece)
+                            这是你的核心任务！请在保持学生原意的前提下，重写这篇应用文。**必须严格贴合上方的作文题目要求**。
                             - 必须使用至少 2 个高级句型（如：倒装句、强调句、非谓语动词作状语/定语、复合从句）。
                             - 必须使用地道的高级词汇替换掉平庸词汇。
-                            - 句与句之间必须有符合逻辑的高级衔接词。
-                            - 请将你使用的**高级语法和亮眼词汇**加粗显示，并在段落下方用 💡 简要批注你这样改的绝妙之处。
-                            
+                            - 句与句之间必须有符合逻辑的高级衔接词（如：what is more, consequently, nevertheless）。
+                            - 请将你使用的**高级语法和亮眼词汇**加粗显示，并在段落下方用 💡 逐条简要批注你改动的绝妙之处。
+
+                            ### 📖 六、低级词汇升格速查表
+                            从学生草稿中挑出 3-5 个可以升级的低级词汇，列成表格：
+                            | 学生原词 ❌ | 升格替换 ✅ | 升格理由 |
+                            |-----------|-----------|---------|
+                            | （原词） | （高阶词） | （一句话） |
+
                             【学生草稿】：
                             {st.session_state.essay_draft}
                             """
