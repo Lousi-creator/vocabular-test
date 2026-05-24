@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import pandas as pd
 import os
 import time  
@@ -8,6 +8,7 @@ import hashlib
 import json
 import requests
 import base64
+import fitz
 from openai import OpenAI
 
 def get_secret(key, default=""):
@@ -295,6 +296,25 @@ def init_db():
             PRIMARY KEY (username, word)
         )
     ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS credit_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'pending'
+        )
+    ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS learning_roadmap (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            category TEXT NOT NULL,
+            item TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -417,6 +437,88 @@ def reject_user(username):
     conn.commit()
     conn.close()
 
+def has_pending_credit_request(username):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM credit_requests WHERE username = ? AND status = 'pending'", (username,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def request_credits(username):
+    if has_pending_credit_request(username):
+        return False
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO credit_requests (username, status) VALUES (?, 'pending')", (username,))
+    conn.commit()
+    conn.close()
+    return True
+
+def get_pending_credit_requests():
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT id, username FROM credit_requests WHERE status = 'pending' ORDER BY requested_at")
+    requests = [(row[0], row[1]) for row in c.fetchall()]
+    conn.close()
+    return requests
+
+def approve_credit_request(request_id, username, credits_to_add):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("UPDATE credit_requests SET status = 'approved' WHERE id = ?", (request_id,))
+    c.execute("UPDATE users SET credits = credits + ? WHERE username = ?", (credits_to_add, username))
+    c.execute("SELECT credits FROM users WHERE username = ?", (username,))
+    new_credits = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return new_credits
+
+def reject_credit_request(request_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("UPDATE credit_requests SET status = 'rejected' WHERE id = ?", (request_id,))
+    conn.commit()
+    conn.close()
+
+def get_user_credits(username):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('SELECT credits FROM users WHERE username = ?', (username,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def add_roadmap_item(username, category, item):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM learning_roadmap WHERE username = ? AND item = ?", (username, item))
+    if c.fetchone()[0] > 0:
+        conn.close()
+        return False
+    c.execute("INSERT INTO learning_roadmap (username, category, item) VALUES (?, ?, ?)", (username, category, item))
+    conn.commit()
+    conn.close()
+    return True
+
+def get_roadmap(username):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT category, item FROM learning_roadmap WHERE username = ? ORDER BY created_at DESC", (username,))
+    rows = c.fetchall()
+    conn.close()
+    grouped = {}
+    for cat, item in rows:
+        grouped.setdefault(cat, []).append(item)
+    return grouped
+
+def clear_roadmap(username):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM learning_roadmap WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
+
 # ==========================================
 # 数据文件初始化容错处理 
 # ==========================================
@@ -486,6 +588,26 @@ if 'listening_answers' not in st.session_state:
     st.session_state.listening_answers = {}
 if 'listening_finished' not in st.session_state:
     st.session_state.listening_finished = False
+if 'continuation_lecture' not in st.session_state:
+    st.session_state.continuation_lecture = None
+if 'continuation_page_idx' not in st.session_state:
+    st.session_state.continuation_page_idx = 0
+if 'drill_mode' not in st.session_state:
+    st.session_state.drill_mode = None
+if 'drill_technique' not in st.session_state:
+    st.session_state.drill_technique = '全部技法'
+if 'drill_q_idx' not in st.session_state:
+    st.session_state.drill_q_idx = 0
+if 'drill_user_answer' not in st.session_state:
+    st.session_state.drill_user_answer = ''
+if 'drill_ai_question' not in st.session_state:
+    st.session_state.drill_ai_question = None
+if 'drill_ai_feedback' not in st.session_state:
+    st.session_state.drill_ai_feedback = None
+if 'drill_correct' not in st.session_state:
+    st.session_state.drill_correct = 0
+if 'drill_total' not in st.session_state:
+    st.session_state.drill_total = 0
 
 def navigate_to(page_name):
     st.session_state.current_page = page_name
@@ -637,15 +759,58 @@ if st.session_state.current_user is None:
         st.markdown("</div>", unsafe_allow_html=True)
 
 elif st.session_state.current_page == 'home':
+    st.session_state.user_credits = get_user_credits(st.session_state.current_user)
     st.markdown(f"""
-    <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px;'>
+    <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;'>
         <div>
             <h2 style='margin: 0; font-weight: 800;'>欢迎回来, <span class='text-highlight'>{st.session_state.current_user}</span></h2>
-            <p style='margin: 0; font-size: 0.9rem;'>当前可用 AI 算力额度：<strong class='text-highlight'>{st.session_state.user_credits}</strong> 次</p>
         </div>
     </div>
     """, unsafe_allow_html=True)
-    
+
+    current_credits = st.session_state.user_credits
+    has_pending = has_pending_credit_request(st.session_state.current_user)
+
+    st.markdown("<div class='glass-card' style='text-align:center; padding: 18px 20px; margin-bottom: 24px;'>", unsafe_allow_html=True)
+    if current_credits <= 1:
+        st.markdown(f"""
+        <p style='font-size: 0.95rem; color: #f8fafc; margin: 0 0 6px 0;'>
+            ⚠️ AI 算力余额：<span class='text-danger' style='font-weight:700;'>{current_credits}</span> 次
+        </p>
+        """, unsafe_allow_html=True)
+        if has_pending:
+            st.info("⏳ 申请已提交，等待管理员审核中...", icon="📨")
+        else:
+            st.warning("额度即将耗尽！", icon="🪫")
+            if st.button("📩 向管理员申请更多额度", key="req_credits", use_container_width=True):
+                if request_credits(st.session_state.current_user):
+                    st.success("✅ 申请已提交！请耐心等待管理员审核。")
+                    st.rerun()
+                else:
+                    st.warning("你已有一个待审核的申请，请勿重复提交。")
+    elif current_credits <= 2:
+        st.markdown(f"""
+        <p style='font-size: 0.95rem; color: #f8fafc; margin: 0;'>
+            🔋 AI 算力余额：<span class='text-warning' style='font-weight:700;'>{current_credits}</span> 次
+        </p>
+        """, unsafe_allow_html=True)
+        if has_pending:
+            st.info("📨 申请已提交，等待管理员审核中...")
+        else:
+            if st.button("📩 申请补充额度", key="req_credits_2", use_container_width=True):
+                if request_credits(st.session_state.current_user):
+                    st.success("✅ 申请已提交！请耐心等待管理员审核。")
+                    st.rerun()
+                else:
+                    st.warning("你已有一个待审核的申请。")
+    else:
+        st.markdown(f"""
+        <p style='font-size: 0.95rem; color: #f8fafc; margin: 0;'>
+            ✅ AI 算力余额：<span class='text-success' style='font-weight:700;'>{current_credits}</span> 次
+        </p>
+        """, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
     col_empty, col_out = st.columns([5, 1])
     with col_out:
         if st.button("退出登录", use_container_width=True):
@@ -654,8 +819,7 @@ elif st.session_state.current_page == 'home':
             st.rerun()
 
     st.write("<br>", unsafe_allow_html=True)
-    col1, col2, col3 = st.columns(3)
-    
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown("""
         <div class='dash-card'>
@@ -689,6 +853,17 @@ elif st.session_state.current_page == 'home':
         if st.button("开始训练 →", key="nav_listening", use_container_width=True):
             navigate_to('listening')
 
+    with col4:
+        st.markdown("""
+        <div class='dash-card'>
+            <div style='font-size: 50px; margin-bottom: 15px;'>📖</div>
+            <h3 style='margin-bottom: 10px;'>读后续写宝典</h3>
+            <p style='font-size: 0.9rem; margin-bottom: 25px;'>巅峰之作五讲精粹，情节构思、描写技法、满分范例。</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("翻开宝典 →", key="nav_continuation", use_container_width=True):
+            navigate_to('continuation')
+
     if st.session_state.is_admin:
         st.write("<br>", unsafe_allow_html=True)
         st.markdown("---")
@@ -708,6 +883,28 @@ elif st.session_state.current_page == 'home':
                         approve_user(pu); st.rerun()
                     if c3.button("拦截", key=f"rej_{pu}", use_container_width=True):
                         reject_user(pu); st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.write("<br>", unsafe_allow_html=True)
+            st.markdown("<div class='glass-card' style='text-align:center; padding: 20px;'>", unsafe_allow_html=True)
+            st.markdown("<h5>🔋 额度申请审核</h5>", unsafe_allow_html=True)
+            credit_reqs = get_pending_credit_requests()
+            if not credit_reqs:
+                st.info("暂无额度申请")
+            else:
+                st.warning(f"{len(credit_reqs)} 条额度申请待处理")
+                for req_id, req_user in credit_reqs:
+                    st.markdown(f"<p style='margin-bottom:8px;'><b>{req_user}</b> 请求补充额度</p>", unsafe_allow_html=True)
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                    if c2.button("+1", key=f"cr_app1_{req_id}", use_container_width=True):
+                        new_creds = approve_credit_request(req_id, req_user, 1)
+                        st.success(f"已批准 {req_user} +1 额度（当前 {new_creds}）"); st.rerun()
+                    if c3.button("+2", key=f"cr_app2_{req_id}", use_container_width=True):
+                        new_creds = approve_credit_request(req_id, req_user, 2)
+                        st.success(f"已批准 {req_user} +2 额度（当前 {new_creds}）"); st.rerun()
+                    if c4.button("拒绝", key=f"cr_rej_{req_id}", use_container_width=True):
+                        reject_credit_request(req_id)
+                        st.success(f"已拒绝 {req_user} 的申请"); st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
 elif st.session_state.current_page == 'vocab':
@@ -943,13 +1140,375 @@ elif st.session_state.current_page == 'listening':
     else:
         st.error("未找到听力题库文件。")
 
+elif st.session_state.current_page == 'continuation':
+    st.markdown("<div class='back-btn'>", unsafe_allow_html=True)
+    if st.button("← 返回中央大厅"): navigate_to('home')
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if st.session_state.drill_mode is not None:
+        st.markdown("<h2 style='text-align: center; margin-bottom: 20px;'>✍️ 情境造句训练场</h2>", unsafe_allow_html=True)
+        TECHNIQUES = ['全部技法', '评价判断法', '环境同步法', '动作中断法', '内心矛盾法', '时间压力法', '万能衔接', '主题升华']
+        TECH_DESC = {
+            '评价判断法': '对前文行动给予评价，直接转折或深化情节',
+            '环境同步法': '让外部环境与人物的内心或事件进展产生互动',
+            '动作中断法': '在连贯动作中插入因素，使情节转向',
+            '内心矛盾法': '将人物内心斗争写成两个声音或选择',
+            '时间压力法': '引入时间限制或紧迫后果，迫使人物行动',
+            '万能衔接': '四步法中的衔接句：首句承上，段尾启下',
+            '主题升华': '最后一句提炼主题，力争呼应标题',
+        }
+
+        def reset_drill():
+            st.session_state.drill_mode = None
+            st.session_state.drill_q_idx = 0
+            st.session_state.drill_user_answer = ''
+            st.session_state.drill_ai_question = None
+            st.session_state.drill_ai_feedback = None
+            st.session_state.drill_correct = 0
+            st.session_state.drill_total = 0
+            st.session_state.drill_technique = '全部技法'
+
+        if st.button("← 返回宝典首页", key="drill_back_home", use_container_width=True):
+            reset_drill()
+
+        st.write("<br>", unsafe_allow_html=True)
+
+        is_ai_mode = (st.session_state.drill_mode == 'ai')
+
+        col_t1, col_t2 = st.columns([1.5, 2.5])
+        with col_t1:
+            prev_tech = st.session_state.drill_technique
+            st.session_state.drill_technique = st.selectbox("选择技法", TECHNIQUES, index=TECHNIQUES.index(prev_tech) if prev_tech in TECHNIQUES else 0)
+            if st.session_state.drill_technique != prev_tech:
+                st.session_state.drill_q_idx = 0
+                st.session_state.drill_ai_question = None
+                st.session_state.drill_ai_feedback = None
+                st.session_state.drill_user_answer = ''
+        with col_t2:
+            if st.session_state.drill_technique != '全部技法':
+                st.caption(TECH_DESC.get(st.session_state.drill_technique, ''))
+
+        if is_ai_mode:
+            if st.session_state.drill_ai_question is None:
+                st.markdown("<div class='glass-card' style='text-align:center; padding: 40px 30px;'>", unsafe_allow_html=True)
+                st.markdown("<p style='color:#94a3b8; font-size:1rem;'>AI 将根据你选择的技法生成一道全新的情境造句题</p>", unsafe_allow_html=True)
+                st.write("<br>", unsafe_allow_html=True)
+                if st.button("🎲 AI 出题 (消耗 1 点算力)", type="primary", use_container_width=True):
+                    cur_credits = get_user_credits(st.session_state.current_user)
+                    if cur_credits <= 0:
+                        st.error("算力不足！请返回首页申请额度")
+                    else:
+                        with st.spinner("🧠 AI 正在构思情境..."):
+                            try:
+                                client = OpenAI(api_key=get_secret("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+                                tech_filter = "" if st.session_state.drill_technique == '全部技法' else f"请严格使用「{st.session_state.drill_technique}」这一技法。"
+                                prompt = f"""你是高考英语读后续写的命题专家。请根据以下技法生成一道情境造句训练题。
+
+{tech_filter}
+
+【可用的叙事技法说明】：
+1. 评价判断法：对前文行动给予评价句，如 "This turned out to be..." "Little did I know..." "That decision would change everything."
+2. 环境同步法：外部环境与人物内心互动，如 "Just as she was about to give up, a ray of sunlight broke through..."
+3. 动作中断法：在动作中插入因素使情节转向，如 "He reached for the bread. But his eyes caught the photo on the wall..."
+4. 内心矛盾法：写成两个声音的斗争，如 "A part of me screamed to run away. But a stronger part kept my feet on the ground."
+5. 时间压力法：引入时间限制，如 "Looking at his watch, he realized he had only ten minutes..."
+6. 万能衔接：承上启下的过渡句，如 "Seeing a sign glowing down the street, I knew we needed..."
+7. 主题升华：结尾提炼主题，如 "Sometimes, a collision doesn't create wreckage, but an opening for kindness."
+
+【输出格式 — 严格 JSON】：
+```json
+{{
+    "scenario": "用中文写一段情境描述（1-2句话，营造画面感）",
+    "template": "用英文写一句含填空的半成品句子，留空处用 _____ 表示（可以是词或短语的填空）",
+    "answer": "template 的完整版英文句子",
+    "technique_note": "用中文简要说明此句运用了什么技法（10字以内）"
+}}
+```
+
+【要求】：
+- scenario 要具体、有画面感，贴合高考续写真题风格
+- template 中的 _____ 必须是关键技法词/短语，学生需要补充核心部分
+- answer 必须语法正确、地道自然
+- 只输出 JSON，不要其他文字"""
+                                response = client.chat.completions.create(
+                                    model="deepseek-chat",
+                                    messages=[{"role": "system", "content": "你是一位高考英语命题专家，严格按 JSON 格式输出。"}, {"role": "user", "content": prompt}],
+                                    temperature=0.9
+                                )
+                                raw = response.choices[0].message.content
+                                json_match = re.search(r'```json\s*([\s\S]*?)\s*```', raw)
+                                data = json.loads(json_match.group(1) if json_match else raw)
+                                st.session_state.drill_ai_question = data
+                                st.session_state.drill_ai_feedback = None
+                                st.session_state.drill_user_answer = ''
+                                deduct_credit(st.session_state.current_user)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"AI 出题失败：{e}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                q = st.session_state.drill_ai_question
+                st.markdown("<div class='glass-card' style='padding: 24px 28px;'>", unsafe_allow_html=True)
+                if st.session_state.drill_technique == '全部技法' and q.get('technique_note'):
+                    st.caption(f"🎯 {q['technique_note']}")
+                st.markdown(f"<p style='color:#f59e0b; font-weight:600; margin-bottom:6px;'>📖 情境：</p><p style='color:#f1f5f9; font-size:1.05rem; line-height:1.8;'>{q['scenario']}</p>", unsafe_allow_html=True)
+                st.write("<br>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color:#60a5fa; font-weight:600; margin-bottom:6px;'>✍️ 请补全：</p><p style='color:#e2e8f0; font-size:1rem; font-family:Georgia,serif; line-height:1.8; background:rgba(0,0,0,0.25); padding:14px 18px; border-radius:10px;'>{q['template']}</p>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+                st.write("<br>", unsafe_allow_html=True)
+                st.session_state.drill_user_answer = st.text_area("你的答案", key="drill_ai_input", value=st.session_state.drill_user_answer, height=100, placeholder="在此输入你补全的英文句子...", label_visibility="collapsed")
+                col_submit, col_newq = st.columns(2)
+                with col_submit:
+                    if st.button("📝 AI 批改 (消耗 1 点算力)", type="primary", use_container_width=True, disabled=not st.session_state.drill_user_answer.strip()):
+                        cur_credits = get_user_credits(st.session_state.current_user)
+                        if cur_credits <= 0:
+                            st.error("算力不足！请返回首页申请额度")
+                        else:
+                            with st.spinner("🧠 AI 正在批改..."):
+                                try:
+                                    client = OpenAI(api_key=get_secret("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+                                    grading_prompt = f"""你是高考英语阅卷老师。请批改学生的情境造句。
+
+【题目】
+情境：{q['scenario']}
+英文模板：{q['template']}
+标准答案：{q['answer']}
+
+【学生答案】
+{st.session_state.drill_user_answer}
+
+【输出格式 — 严格 JSON】：
+```json
+{{
+    "score": "给一个 0-10 的评分（整数）",
+    "feedback": "用中文写 1-2 句评语，指出优点和问题",
+    "correction": "如果需要修正，给出修正后的完整句子；如果已经很好，写 '无需修改'"
+}}
+```
+
+只输出 JSON，不要其他文字。"""
+                                    response = client.chat.completions.create(
+                                        model="deepseek-chat",
+                                        messages=[{"role": "system", "content": "你是一位严格但公正的高考英语阅卷老师。"}, {"role": "user", "content": grading_prompt}],
+                                        temperature=0.3
+                                    )
+                                    raw = response.choices[0].message.content
+                                    json_match = re.search(r'```json\s*([\s\S]*?)\s*```', raw)
+                                    result = json.loads(json_match.group(1) if json_match else raw)
+                                    st.session_state.drill_ai_feedback = result
+                                    st.session_state.drill_total += 1
+                                    if int(result.get('score', 0)) >= 6:
+                                        st.session_state.drill_correct += 1
+                                    deduct_credit(st.session_state.current_user)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"AI 批改失败：{e}")
+                with col_newq:
+                    if st.button("🎲 换一题", use_container_width=True):
+                        st.session_state.drill_ai_question = None
+                        st.session_state.drill_ai_feedback = None
+                        st.session_state.drill_user_answer = ''
+                        st.rerun()
+
+                if st.session_state.drill_ai_feedback:
+                    fb = st.session_state.drill_ai_feedback
+                    score = int(fb.get('score', 0))
+                    score_color = '#22c55e' if score >= 8 else '#f59e0b' if score >= 6 else '#ef4444'
+                    st.write("<br>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='glass-card' style='border-top: 4px solid {score_color}; padding: 20px 24px;'>", unsafe_allow_html=True)
+                    st.markdown(f"<h3 style='color:{score_color}; margin-top:0;'>📊 AI 评分：{score}/10</h3>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='color:#e2e8f0; line-height:1.7;'>{fb.get('feedback', '')}</p>", unsafe_allow_html=True)
+                    corr = fb.get('correction', '')
+                    if corr and corr != '无需修改':
+                        st.markdown(f"<p style='color:#60a5fa; font-weight:600; margin-top:12px;'>✅ 修正版：</p><p style='color:#f1f5f9; background:rgba(0,0,0,0.3); padding:10px 16px; border-radius:8px; font-family:Georgia,serif;'>{corr}</p>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='color:#94a3b8; margin-top:12px;'>💡 标准答案：<span style='color:#10b981; font-family:Georgia,serif;'>{q['answer']}</span></p>", unsafe_allow_html=True)
+                    st.markdown("<p style='color:#64748b; font-size:0.8rem; margin-top:8px;'>🎯 " + q.get('technique_note', '') + "</p>", unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+        else:
+            if os.path.exists('continuation_drills.csv'):
+                df_drills = pd.read_csv('continuation_drills.csv')
+                tech_filter = st.session_state.drill_technique
+                if tech_filter != '全部技法':
+                    df_drills = df_drills[df_drills['technique'] == tech_filter]
+                if len(df_drills) == 0:
+                    st.info("该技法暂无题库，试试「全部技法」或切换技法")
+                else:
+                    q_idx = st.session_state.drill_q_idx % len(df_drills)
+                    row = df_drills.iloc[q_idx]
+                    st.markdown("<div class='glass-card' style='padding: 24px 28px;'>", unsafe_allow_html=True)
+                    st.caption(f"🎯 {row['technique']}")
+                    st.markdown(f"<p style='color:#f59e0b; font-weight:600; margin-bottom:6px;'>📖 情境：</p><p style='color:#f1f5f9; font-size:1.05rem; line-height:1.8;'>{row['scenario']}</p>", unsafe_allow_html=True)
+                    st.write("<br>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='color:#60a5fa; font-weight:600; margin-bottom:6px;'>✍️ 请补全：</p><p style='color:#e2e8f0; font-size:1rem; font-family:Georgia,serif; line-height:1.8; background:rgba(0,0,0,0.25); padding:14px 18px; border-radius:10px;'>{row['template']}</p>", unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                    st.write("<br>", unsafe_allow_html=True)
+                    if 'classic_show_answer' not in st.session_state:
+                        st.session_state.classic_show_answer = False
+                    user_ans = st.text_area("你的答案", key="drill_classic_input", height=100, placeholder="在此输入你补全的英文句子...", label_visibility="collapsed")
+                    col_chk, col_nxt = st.columns(2)
+                    with col_chk:
+                        if st.button("✅ 查看答案", use_container_width=True, disabled=not user_ans.strip()):
+                            st.session_state.classic_show_answer = True
+                            st.session_state.drill_total += 1
+                    with col_nxt:
+                        def next_classic_q():
+                            st.session_state.drill_q_idx = (st.session_state.drill_q_idx + 1) % len(df_drills)
+                            st.session_state.classic_show_answer = False
+                        st.button("➡ 下一题", key="drill_next_btn", on_click=next_classic_q, use_container_width=True)
+
+                    if st.session_state.classic_show_answer:
+                        st.write("<br>", unsafe_allow_html=True)
+                        st.markdown("<div class='glass-card' style='border-top: 4px solid #22c55e; padding: 20px 24px;'>", unsafe_allow_html=True)
+                        st.markdown(f"<p style='color:#10b981; font-weight:600;'>✅ 标准答案：</p><p style='color:#f1f5f9; font-family:Georgia,serif; line-height:1.8;'>{row['answer']}</p>", unsafe_allow_html=True)
+                        st.markdown(f"<p style='color:#64748b; font-size:0.85rem; margin-top:8px;'>💡 {row['tip']}</p>", unsafe_allow_html=True)
+                        st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                st.error("题库文件缺失")
+
+        st.write("<br>", unsafe_allow_html=True)
+        if st.session_state.drill_total > 0:
+            acc = round(st.session_state.drill_correct / st.session_state.drill_total * 100) if st.session_state.drill_total > 0 else 0
+            st.markdown(f"<p style='text-align:center; color:#94a3b8; font-size:0.85rem;'>本次训练：{st.session_state.drill_total} 题 | 通过率 {acc}%</p>", unsafe_allow_html=True)
+
+    else:
+        st.markdown("<h2 style='text-align: center; margin-bottom: 20px;'>📖 读后续写 · 巅峰之作</h2>", unsafe_allow_html=True)
+
+        LECTURES = [
+            ("第一讲", "情节构思与实战", 7),
+            ("第二讲", "情节构思进阶", 8),
+            ("第三讲", "综合实战演练", 68),
+            ("第四讲", "描写技法精讲", 48),
+            ("第五讲", "情节构思原则+实战", 8),
+        ]
+
+        def open_lecture(lidx):
+            st.session_state.continuation_lecture = lidx
+            st.session_state.continuation_page_idx = 0
+
+        def go_prev():
+            st.session_state.continuation_page_idx -= 1
+
+        def go_next():
+            st.session_state.continuation_page_idx += 1
+
+        def back_to_catalog():
+            st.session_state.continuation_lecture = None
+            st.session_state.continuation_page_idx = 0
+
+        if st.session_state.continuation_lecture is None:
+            st.write("<br>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align:center; color:#94a3b8; font-size:0.9rem;'>👇 选择一讲开始阅读</p>", unsafe_allow_html=True)
+            st.write("<br>", unsafe_allow_html=True)
+            for lidx, (lname, ldesc, lpages) in enumerate(LECTURES):
+                icon = "📝" if lidx == 4 else "📷"
+                label = f"{icon} {lname} · {ldesc} ({lpages} 页)"
+                st.markdown(f"<div class='glass-card' style='text-align:center; padding: 18px 24px; margin-bottom: 12px;'>", unsafe_allow_html=True)
+                st.button(label, key=f"sel_lec_{lidx}", on_click=open_lecture, args=(lidx,), use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("<hr style='margin: 28px 0; border-color: rgba(255,255,255,0.08);'>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align:center; color:#94a3b8; font-size:0.9rem;'>👇 或者进入训练模式</p>", unsafe_allow_html=True)
+            st.write("<br>", unsafe_allow_html=True)
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                st.markdown("<div class='glass-card' style='text-align:center; padding: 20px;'>", unsafe_allow_html=True)
+                st.markdown("<div style='font-size:40px;'>📋</div>", unsafe_allow_html=True)
+                st.markdown("<h4>经典题库</h4>", unsafe_allow_html=True)
+                st.markdown("<p style='font-size:0.8rem; color:#94a3b8;'>25 道精选情境造句题<br>不消耗算力，随时练习</p>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+                if st.button("进入经典题库 →", key="go_classic", use_container_width=True):
+                    st.session_state.drill_mode = 'classic'
+                    st.rerun()
+            with col_d2:
+                st.markdown("<div class='glass-card' style='text-align:center; padding: 20px;'>", unsafe_allow_html=True)
+                st.markdown("<div style='font-size:40px;'>🤖</div>", unsafe_allow_html=True)
+                st.markdown("<h4>AI 智能出题</h4>", unsafe_allow_html=True)
+                st.markdown("<p style='font-size:0.8rem; color:#94a3b8;'>AI 随机生成新题 + 批改<br>每题消耗 2 点算力</p>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+                if st.button("进入 AI 出题 →", key="go_ai", use_container_width=True):
+                    st.session_state.drill_mode = 'ai'
+                    st.rerun()
+        else:
+            lidx = st.session_state.continuation_lecture
+            lname, ldesc, lpages = LECTURES[lidx]
+            is_text = (lidx == 4)
+
+            st.markdown(f"<div class='glass-card' style='text-align:center; padding: 14px 20px; margin-bottom: 16px;'>", unsafe_allow_html=True)
+            st.markdown(f"<p style='color:#94a3b8; font-size:0.8rem; margin:0;'>📖 {lname} · {ldesc} ({lpages} 页)</p>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            pg = st.session_state.continuation_page_idx
+
+            if is_text:
+                txt_path = "extension_writing_l5.txt"
+                if os.path.exists(txt_path):
+                    with open(txt_path, "r", encoding="utf-8") as f:
+                        raw = f.read()
+                    chunks = raw.split("\n\n")
+                    if pg < len(chunks):
+                        st.markdown(f"<div class='glass-card' style='padding: 24px 28px; line-height: 1.9; font-size: 0.95rem; color: #e2e8f0;'>{chunks[pg].replace(chr(10), '<br>')}</div>", unsafe_allow_html=True)
+                    else:
+                        st.info("本讲已读完 ✅")
+                    total = max(len(chunks) - 1, 1)
+                else:
+                    st.error("第五讲文字文件缺失")
+                    total = lpages
+            else:
+                folder = os.path.join("continuation_writing", lname)
+                img_name = f"p{pg+1:03d}.png"
+                img_path = os.path.join(folder, img_name)
+                if os.path.exists(img_path):
+                    st.image(img_path, use_container_width=True)
+                else:
+                    st.info(f"第 {pg+1} 页暂无图片")
+                total = lpages
+
+            st.write("<br>", unsafe_allow_html=True)
+            col_prev, col_sel, col_next = st.columns([1, 2, 1])
+            with col_prev:
+                if pg > 0:
+                    st.button("⬅ 上一页", key="cont_prev", on_click=go_prev, use_container_width=True)
+            with col_sel:
+                st.markdown(f"<p style='text-align:center; color:#94a3b8; line-height:2.5;'>{pg+1} / {total}</p>", unsafe_allow_html=True)
+            with col_next:
+                if pg < total - 1:
+                    st.button("下一页 ➡", key="cont_next", on_click=go_next, use_container_width=True)
+
+            st.write("<br>", unsafe_allow_html=True)
+            col_back, _ = st.columns([1, 3])
+            with col_back:
+                st.button("📚 返回目录", key="cont_back", on_click=back_to_catalog, use_container_width=True)
+
 elif st.session_state.current_page == 'essay':
+    st.session_state.user_credits = get_user_credits(st.session_state.current_user)
     st.markdown("<div class='back-btn'>", unsafe_allow_html=True)
     if st.button("← 返回中央大厅"): navigate_to('home')
     st.markdown("</div>", unsafe_allow_html=True)
     
-    st.markdown("<h2 style='text-align: center; margin-bottom: 30px;'>✍️ 高考文书锻造工坊</h2>", unsafe_allow_html=True)
-    
+    st.markdown("<h2 style='text-align: center; margin-bottom: 15px;'>✍️ 高考文书锻造工坊</h2>", unsafe_allow_html=True)
+
+    roadmap = get_roadmap(st.session_state.current_user)
+    if roadmap:
+        total_items = sum(len(v) for v in roadmap.values())
+        with st.expander(f"🗺️ 我的学习路线 ({total_items} 条待学习)", expanded=False):
+            CAT_ICONS_R = {"词汇升级": ("📝", "#f59e0b"), "句型升级": ("🏗️", "#3b82f6"), "语法强化": ("🔧", "#ef4444"), "衔接优化": ("🔗", "#10b981")}
+            for cat, items in roadmap.items():
+                icon, color = CAT_ICONS_R.get(cat, ("📌", "#94a3b8"))
+                st.markdown(f"<p style='font-weight:700; color:{color}; margin-bottom:4px;'>{icon} {cat}（{len(items)}）</p>", unsafe_allow_html=True)
+                for itm in items:
+                    st.markdown(f"<div style='background:rgba(0,0,0,0.2); padding:6px 12px; border-radius:6px; margin-bottom:5px; margin-left:8px; border-left:3px solid {color}; font-size:0.85rem; color:#cbd5e1;'>{itm}</div>", unsafe_allow_html=True)
+            _, col_reset = st.columns([5, 1])
+            with col_reset:
+                if st.button("🗑️ 清空路线", key="clear_roadmap_essay", use_container_width=True):
+                    clear_roadmap(st.session_state.current_user)
+                    st.rerun()
+    else:
+        with st.expander("🗺️ 我的学习路线（暂无）", expanded=False):
+            st.caption("提交作文批改后，AI 会为你生成专属学习路线")
+
     with st.container():
         st.markdown("<p style='color: #94a3b8; font-size: 0.85rem; margin-bottom: 5px;'>📋 作文题目（中文）：</p>", unsafe_allow_html=True)
         st.text_area(" ", height=80, key="essay_topic", placeholder="例如：假定你是李华，你的英国朋友Peter来信询问你校学生体育运动情况。请给他回信...", label_visibility="collapsed")
@@ -1016,7 +1575,9 @@ elif st.session_state.current_page == 'essay':
             if current_time - st.session_state.last_ai_time < COOLDOWN_SECONDS:
                 st.warning(f"引擎冷却中：请等待 {int(COOLDOWN_SECONDS - (current_time - st.session_state.last_ai_time))} 秒。")
             elif not has_credits and not user_api_key:
-                st.error("🛑 系统配额已耗尽，请注入私人 Key 启动。")
+                st.error("🛑 系统配额已耗尽。你可以返回首页向管理员申请补充额度，或在此输入私人 Key。")
+                if st.button("📩 去申请额度", key="goto_req_credits", use_container_width=True):
+                    navigate_to('home')
             else:
                 with st.spinner("🧠 神经元网络正在解构你的文章..."):
                     try:
@@ -1083,6 +1644,22 @@ elif st.session_state.current_page == 'essay':
                             |-----------|-----------|---------|
                             | （原词） | （高阶词） | （一句话） |
 
+                            ### 🗺️ 七、个性化学习路线 (JSON)
+                            根据学生在本次作文中暴露出的具体弱点，生成一份定制化学习路线。你必须输出一个严格的 JSON 数组（不要有任何其他文字），格式如下：
+                            ```json
+                            [
+                                {{"category": "词汇升级", "item": "将 'happy' 替换为 'delighted / thrilled'"}},
+                                {{"category": "句型升级", "item": "学习强调句：It is ... that ..."}},
+                                {{"category": "语法强化", "item": "主谓一致：主语是第三人称单数时动词要加 s"}},
+                                {{"category": "衔接优化", "item": "用 'What is more' 代替 'And' 来连接段落"}}
+                            ]
+                            ```
+                            要求：
+                            - 类别只能是以下四种之一：`词汇升级`、`句型升级`、`语法强化`、`衔接优化`
+                            - 每条 item 要具体到学生作文中的真实错误，不能泛泛而谈
+                            - 至少输出 3 条，最多 6 条
+                            - 必须严格输出 JSON 代码块，方便系统解析
+
                             【学生草稿】：
                             {st.session_state.essay_draft}
                             """
@@ -1092,6 +1669,20 @@ elif st.session_state.current_page == 'essay':
                                 temperature=0.7 
                             )
                             ai_feedback = response.choices[0].message.content
+                            
+                            roadmap_items = []
+                            try:
+                                json_match = re.search(r'```json\s*([\s\S]*?)\s*```', ai_feedback)
+                                if json_match:
+                                    roadmap_data = json.loads(json_match.group(1))
+                                    for entry in roadmap_data:
+                                        cat = entry.get("category", "").strip()
+                                        itm = entry.get("item", "").strip()
+                                        if cat and itm:
+                                            add_roadmap_item(st.session_state.current_user, cat, itm)
+                                            roadmap_items.append((cat, itm))
+                            except Exception:
+                                pass
                             
                             if not user_api_key:
                                 new_creds = deduct_credit(st.session_state.current_user)
@@ -1107,6 +1698,15 @@ elif st.session_state.current_page == 'essay':
                                 </div>
                             </div>
                             """, unsafe_allow_html=True)
+                            if roadmap_items:
+                                st.markdown("<div class='glass-card' style='border-top: 4px solid #f59e0b; margin-top: 20px;'>", unsafe_allow_html=True)
+                                st.markdown("<h4 style='color: #f59e0b; margin-top: 0;'>🗺️ 你的专属学习路线已更新</h4>", unsafe_allow_html=True)
+                                CAT_ICONS = {"词汇升级": "📝", "句型升级": "🏗️", "语法强化": "🔧", "衔接优化": "🔗"}
+                                for cat, itm in roadmap_items:
+                                    icon = CAT_ICONS.get(cat, "📌")
+                                    st.markdown(f"<div style='background:rgba(0,0,0,0.3); padding:10px 15px; border-radius:10px; margin-bottom:8px; border-left:3px solid #f59e0b;'><span style='font-size:0.85rem; color:#f59e0b; font-weight:600;'>{icon} {cat}</span><br><span style='color:#e2e8f0;'>{itm}</span></div>", unsafe_allow_html=True)
+                                st.caption("💡 所有路线已保存，返回首页可随时查看你的完整学习计划")
+                                st.markdown("</div>", unsafe_allow_html=True)
                     except Exception as e: st.error(f"❌ 神经元连接失败：{e}")
                     
     st.markdown("<h4 style='margin-top: 40px; margin-bottom: 20px;'>📚 模块化组件库</h4>", unsafe_allow_html=True)
