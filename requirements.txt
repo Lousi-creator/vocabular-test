@@ -3,3 +3,4 @@ pandas
 gTTS
 openai
 python-dotenv
+PyMuPDF
